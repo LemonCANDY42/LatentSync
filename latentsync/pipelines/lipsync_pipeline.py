@@ -3,7 +3,7 @@
 import inspect
 import os
 import shutil
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Dict
 import subprocess
 
 import numpy as np
@@ -291,6 +291,33 @@ class LipsyncPipeline(DiffusionPipeline):
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
             out_frames.append(out_frame)
         return np.stack(out_frames, axis=0)
+    
+    def streaming_video_frames(self, faces, video_frames, boxes, affine_matrices):
+        """
+        流式输出视频帧的方法，用于实时应用
+        
+        Args:
+            faces: 处理后的人脸张量
+            video_frames: 原始视频帧
+            boxes: 人脸框
+            affine_matrices: 仿射变换矩阵
+            
+        Returns:
+            生成器，每次生成一帧处理后的视频
+        """
+        video_frames = video_frames[: faces.shape[0]]
+        print(f"Streaming {len(faces)} faces...")
+        
+        for index, face in enumerate(tqdm.tqdm(faces)):
+            x1, y1, x2, y2 = boxes[index]
+            height = int(y2 - y1)
+            width = int(x2 - x1)
+            face = torchvision.transforms.functional.resize(face, size=(height, width), antialias=True)
+            face = rearrange(face, "c h w -> h w c")
+            face = (face / 2 + 0.5).clamp(0, 1)
+            face = (face * 255).to(torch.uint8).cpu().numpy()
+            out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
+            yield out_frame
 
     @torch.no_grad()
     def __call__(
@@ -312,6 +339,9 @@ class LipsyncPipeline(DiffusionPipeline):
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
+        streaming_output: bool = False,
+        preprocess_only: bool = False,
+        precomputed_data: Optional[Dict] = None,
         **kwargs,
     ):
         is_train = self.unet.training
@@ -325,7 +355,30 @@ class LipsyncPipeline(DiffusionPipeline):
         self.image_processor = ImageProcessor(height, mask=mask, device="cuda")
         self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
 
-        faces, original_video_frames, boxes, affine_matrices = self.affine_transform_video(video_path)
+        # 预处理部分 - 可以利用缓存优化
+        if precomputed_data is not None:
+            # 使用预计算的数据，跳过预处理
+            faces = precomputed_data['faces']
+            original_video_frames = precomputed_data['original_video_frames']
+            boxes = precomputed_data['boxes']
+            affine_matrices = precomputed_data['affine_matrices']
+            
+            # 如果是张量，确保在正确的设备上
+            if isinstance(faces, torch.Tensor):
+                faces = faces.to(device)
+        else:
+            # 正常的预处理流程
+            faces, original_video_frames, boxes, affine_matrices = self.affine_transform_video(video_path)
+            
+            # 如果只是预处理，返回结果
+            if preprocess_only:
+                return {
+                    'faces': faces,
+                    'original_video_frames': original_video_frames,
+                    'boxes': boxes,
+                    'affine_matrices': affine_matrices,
+                }
+
         audio_samples = read_audio(audio_path)
 
         # 1. Default height and width to unet
@@ -448,13 +501,19 @@ class LipsyncPipeline(DiffusionPipeline):
             synced_video_frames.append(decoded_latents)
             # masked_video_frames.append(masked_pixel_values)
 
-        # TODO: 如果启用流式输出，则需要创建一个新的流式输出方法streaming_video_frames,使其能够流式输出视频帧,
-        synced_video_frames = self.restore_video(
-            torch.cat(synced_video_frames), original_video_frames, boxes, affine_matrices
-        )
-        # masked_video_frames = self.restore_video(
-        #     torch.cat(masked_video_frames), original_video_frames, boxes, affine_matrices
-        # )
+        # 处理是否使用流式输出
+        if streaming_output:
+            # 返回生成器，流式输出视频帧
+            return self.streaming_video_frames(
+                torch.cat(synced_video_frames), original_video_frames, boxes, affine_matrices
+            )
+        else:
+            # 传统的非流式输出方式，返回完整处理后的视频帧数组
+            synced_video_frames = self.restore_video(
+                torch.cat(synced_video_frames), original_video_frames, boxes, affine_matrices
+            )
+            
+            out_folder = os.path.dirname(video_out_path)
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
