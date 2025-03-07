@@ -317,7 +317,7 @@ class LipsyncPipeline(DiffusionPipeline):
             face = (face / 2 + 0.5).clamp(0, 1)
             face = (face * 255).to(torch.uint8).cpu().numpy()
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
-            yield out_frame
+            return out_frame
 
     @torch.no_grad()
     def __call__(
@@ -363,9 +363,6 @@ class LipsyncPipeline(DiffusionPipeline):
             boxes = precomputed_data['boxes']
             affine_matrices = precomputed_data['affine_matrices']
             
-            # 如果是张量，确保在正确的设备上
-            if isinstance(faces, torch.Tensor):
-                faces = faces.to(device)
         else:
             # 正常的预处理流程
             faces, original_video_frames, boxes, affine_matrices = self.affine_transform_video(video_path)
