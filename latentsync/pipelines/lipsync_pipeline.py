@@ -36,6 +36,8 @@ from ..whisper.audio2feature import Audio2Feature
 import tqdm
 import soundfile as sf
 
+import time
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
@@ -279,17 +281,47 @@ class LipsyncPipeline(DiffusionPipeline):
         video_frames = video_frames[: faces.shape[0]]
         out_frames = []
         print(f"Restoring {len(faces)} faces...")
+        
+        # 添加性能计时字典
+        time_stats = {
+            'resize': 0.0,
+            'rearrange': 0.0,
+            'clamp_convert': 0.0,
+            'restore_img': 0.0
+        }
+        
         for index, face in enumerate(tqdm.tqdm(faces)):
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
             width = int(x2 - x1)
+            
+            # 计时每个关键步骤
+            start_time = time.time()
             face = torchvision.transforms.functional.resize(face, size=(height, width), antialias=True)
+            time_stats['resize'] += time.time() - start_time
+            
+            start_time = time.time()
             face = rearrange(face, "c h w -> h w c")
+            time_stats['rearrange'] += time.time() - start_time
+            
+            start_time = time.time()
             face = (face / 2 + 0.5).clamp(0, 1)
             face = (face * 255).to(torch.uint8).cpu().numpy()
-            # face = cv2.resize(face, (width, height), interpolation=cv2.INTER_LANCZOS4)
+            time_stats['clamp_convert'] += time.time() - start_time
+            
+            start_time = time.time()
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
+            time_stats['restore_img'] += time.time() - start_time
+            
             out_frames.append(out_frame)
+        
+        # 打印各步骤平均耗时
+        total_frames = len(faces)
+        print(f"\n性能分析（平均耗时/帧）:")
+        for k, v in time_stats.items():
+            avg_time = v / total_frames * 1000  # 转换为毫秒
+            print(f"- {k:12s}: {avg_time:.2f}ms")
+            
         return np.stack(out_frames, axis=0)
     
     def streaming_video_frames(self, faces, video_frames, boxes, affine_matrices):

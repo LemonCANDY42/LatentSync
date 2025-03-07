@@ -36,16 +36,11 @@ def load_fixed_mask(resolution: int) -> torch.Tensor:
     # 获取mask.png的绝对路径
     mask_path = current_file.parent / "mask.png"
     
-    if not mask_path.exists():
-        # 如果mask.png不存在，创建一个默认的mask
-        print(f"警告: mask文件不存在: {mask_path}，创建默认mask")
-        mask_image = np.ones((resolution, resolution, 3), dtype=np.uint8) * 255
-    else:
-        # 使用绝对路径加载mask.png
-        mask_image = cv2.imread(str(mask_path))
-        if mask_image is None:
-            print(f"警告: 无法加载mask文件: {mask_path}，创建默认mask")
-            mask_image = np.ones((resolution, resolution, 3), dtype=np.uint8) * 255
+
+    # 使用绝对路径加载mask.png
+    mask_image = cv2.imread(str(mask_path))
+    if mask_image is None:
+        print(f"警告: 无法加载mask文件: {mask_path}，创建默认mask")
     
     mask_image = cv2.cvtColor(mask_image, cv2.COLOR_BGR2RGB)
     mask_image = cv2.resize(mask_image, (resolution, resolution), interpolation=cv2.INTER_LANCZOS4) / 255.0
