@@ -86,23 +86,12 @@ class AlignRestore(object):
         return cropped_face, affine_matrix
 
     def restore_img(self, input_img, face, affine_matrix):
-        # 初始化耗时统计字典
-        if not hasattr(self, 'time_stats'):
-            self.time_stats = defaultdict(float)
-            self.call_count = 0
-            
-        start_total = time.time()
-        self.call_count += 1
-        
         # 图像上采样
         h, w, _ = input_img.shape
         h_up, w_up = int(h * self.upscale_factor), int(w * self.upscale_factor)
-        t0 = time.time()
         upsample_img = cv2.resize(input_img, (w_up, h_up), interpolation=cv2.INTER_LANCZOS4)
-        self.time_stats['上采样'] += time.time() - t0
 
         # 逆仿射变换计算
-        t0 = time.time()
         inverse_affine = cv2.invertAffineTransform(affine_matrix)
         inverse_affine *= self.upscale_factor
         if self.upscale_factor > 1:
@@ -110,44 +99,46 @@ class AlignRestore(object):
         else:
             extra_offset = 0
         inverse_affine[:, 2] += extra_offset
-        self.time_stats['逆仿射变换'] += time.time() - t0
 
         # 人脸恢复变换
-        t0 = time.time()
         inv_restored = cv2.warpAffine(face, inverse_affine, (w_up, h_up), flags=cv2.INTER_LANCZOS4)
-        self.time_stats['人脸变换'] += time.time() - t0
 
         # 掩模处理
-        t0 = time.time()
         mask = np.ones((self.face_size[1], self.face_size[0]), dtype=np.float32)
         inv_mask = cv2.warpAffine(mask, inverse_affine, (w_up, h_up))
         inv_mask_erosion = cv2.erode(
             inv_mask, np.ones((int(2 * self.upscale_factor), int(2 * self.upscale_factor)), np.uint8)
         )
-        self.time_stats['掩模处理'] += time.time() - t0
 
         # 人脸融合
-        t0 = time.time()
-        pasted_face = inv_mask_erosion[:, :, None] * inv_restored
-        total_face_area = np.sum(inv_mask_erosion)
-        self.time_stats['人脸融合'] += time.time() - t0
+        # 原有实现
+        # pasted_face = inv_mask_erosion[:, :, None] * inv_restored
+        # total_face_area = np.sum(inv_mask_erosion)
+        
+        # 使用GPU加速实现
+        inv_mask_erosion_tensor = torch.from_numpy(inv_mask_erosion).cuda()
+        inv_restored_tensor = torch.from_numpy(inv_restored).cuda()
+        
+        # 在GPU上进行张量运算
+        pasted_face_tensor = inv_mask_erosion_tensor.unsqueeze(2) * inv_restored_tensor
+        total_face_area_tensor = torch.sum(inv_mask_erosion_tensor)
+        
+        # 转换回CPU并保持内存共享
+        pasted_face = pasted_face_tensor.cpu().numpy()
+        total_face_area = total_face_area_tensor.cpu().item()
 
         # 边缘处理
-        t0 = time.time()
         w_edge = int(total_face_area**0.5) // 20
         erosion_radius = w_edge * 2
         inv_mask_center = cv2.erode(inv_mask_erosion, np.ones((erosion_radius, erosion_radius), np.uint8))
-        self.time_stats['边缘处理'] += time.time() - t0
 
         # 模糊处理
-        t0 = time.time()
         blur_size = w_edge * 2
         inv_soft_mask = cv2.GaussianBlur(inv_mask_center, (blur_size + 1, blur_size + 1), 0)
         inv_soft_mask = inv_soft_mask[:, :, None]
-        self.time_stats['模糊处理'] += time.time() - t0
 
         # 合成计算
-        t0 = time.time()
+        # 原始实现
         # upsample_img = inv_soft_mask * pasted_face + (1 - inv_soft_mask) * upsample_img
         # 原始数据准备（Numpy到GPU Tensor）
         pasted_face_tensor = torch.from_numpy(pasted_face).cuda()
@@ -156,10 +147,9 @@ class AlignRestore(object):
 
         # GPU合成计算（保持浮点运算）
         upsample_img_tensor = inv_soft_mask_tensor * pasted_face_tensor + (1 - inv_soft_mask_tensor) * upsample_img_tensor
-        self.time_stats['合成计算'] += time.time() - t0
         
         # 类型转换
-        t0 = time.time()
+        # 原始实现
         # if np.max(upsample_img) > 256:
         #     upsample_img = upsample_img.astype(np.uint16)
         # else:
@@ -173,15 +163,6 @@ class AlignRestore(object):
 
         # 转换回CPU并保持内存共享
         upsample_img = upsample_img_tensor.cpu().numpy()
-        
-        self.time_stats['类型转换'] += time.time() - t0
-        
-        # 记录总耗时
-        self.time_stats['总耗时'] += time.time() - start_total
-        
-        print(f"各项平均耗时(ms):")
-        for k, v in self.time_stats.items():
-            print(f"{k}: {v * 1000 / self.call_count:.2f}ms")
         
         return upsample_img
 
