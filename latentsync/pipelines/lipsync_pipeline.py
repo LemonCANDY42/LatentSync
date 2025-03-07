@@ -274,7 +274,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
         faces = torch.stack(faces)
         return faces, video_frames, boxes, affine_matrices
-
+    
     def restore_video(self, faces, video_frames, boxes, affine_matrices):
         video_frames = video_frames[: faces.shape[0]]
         out_frames = []
@@ -448,6 +448,7 @@ class LipsyncPipeline(DiffusionPipeline):
             synced_video_frames.append(decoded_latents)
             # masked_video_frames.append(masked_pixel_values)
 
+        # TODO: 如果启用流式输出，则需要创建一个新的流式输出方法streaming_video_frames,使其能够流式输出视频帧,
         synced_video_frames = self.restore_video(
             torch.cat(synced_video_frames), original_video_frames, boxes, affine_matrices
         )
