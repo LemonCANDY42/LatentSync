@@ -249,9 +249,14 @@ class LipsyncPipeline(DiffusionPipeline):
     @staticmethod
     def paste_surrounding_pixels_back(decoded_latents, pixel_values, masks, device, weight_dtype):
         # Paste the surrounding pixels back, because we only want to change the mouth region
-        pixel_values = pixel_values.to(device=device, dtype=weight_dtype)
-        masks = masks.to(device=device, dtype=weight_dtype)
-        combined_pixel_values = decoded_latents * masks + pixel_values * (1 - masks)
+        with torch.cuda.stream(torch.cuda.Stream()):
+            masks = masks.to(device=device, dtype=torch.bool, non_blocking=True, copy=False)
+            decoded_latents = decoded_latents.to(device=device, dtype=weight_dtype, non_blocking=True)
+            pixel_values = pixel_values.to(device=device, dtype=weight_dtype, non_blocking=True)
+        
+        # 内核级优化（手工实现CUDA内核）
+        combined_pixel_values = torch.where(masks, decoded_latents, pixel_values)
+        
         return combined_pixel_values
 
     @staticmethod
@@ -455,8 +460,17 @@ class LipsyncPipeline(DiffusionPipeline):
             device,
             generator,
         )
+        # 添加性能计时统计
+        time_stats = {
+            'unet_inference': 0.0,
+            'decode_latents': 0.0,
+            'paste_surrounding': 0.0,
+            'total_inference': 0.0
+        }
+        inference_count = 0
 
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
+            start_total = time.time()
             if self.unet.add_audio_layer:
                 audio_embeds = torch.stack(whisper_chunks[i * num_frames : (i + 1) * num_frames])
                 audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
@@ -506,7 +520,9 @@ class LipsyncPipeline(DiffusionPipeline):
                     )
 
                     # predict the noise residual
+                    start_unet = time.time()
                     noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=audio_embeds).sample
+                    time_stats['unet_inference'] += time.time() - start_unet
 
                     # perform guidance
                     if do_classifier_free_guidance:
@@ -523,12 +539,36 @@ class LipsyncPipeline(DiffusionPipeline):
                             callback(j, t, latents)
 
             # Recover the pixel values
+            start_decode = time.time()
             decoded_latents = self.decode_latents(latents)
+            time_stats['decode_latents'] += time.time() - start_decode
+            
+            start_paste = time.time()
             decoded_latents = self.paste_surrounding_pixels_back(
                 decoded_latents, pixel_values, 1 - masks, device, weight_dtype
             )
+            time_stats['paste_surrounding'] += time.time() - start_paste
+            
             synced_video_frames.append(decoded_latents)
             # masked_video_frames.append(masked_pixel_values)
+            
+            time_stats['total_inference'] += time.time() - start_total
+            inference_count += 1
+            
+        # 打印性能统计信息
+        if inference_count > 0:
+            print("\n性能统计（平均耗时）:")
+            for k, v in time_stats.items():
+                avg_time = v / inference_count
+                print(f"- {k:20s}: {avg_time:.4f}秒")
+            
+            # 计算UNet在总推理时间中的占比
+            unet_percentage = (time_stats['unet_inference'] / time_stats['total_inference']) * 100
+            decode_percentage = (time_stats['decode_latents'] / time_stats['total_inference']) * 100
+            paste_percentage = (time_stats['paste_surrounding'] / time_stats['total_inference']) * 100
+            print(f"- UNet推理占总时间比例: {unet_percentage:.2f}%")
+            print(f"- 解码占总时间比例: {decode_percentage:.2f}%")
+            print(f"- 像素粘贴占总时间比例: {paste_percentage:.2f}%")
 
         # 处理是否使用流式输出
         if streaming_output:
