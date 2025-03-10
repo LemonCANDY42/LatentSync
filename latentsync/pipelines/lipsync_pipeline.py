@@ -354,7 +354,7 @@ class LipsyncPipeline(DiffusionPipeline):
             face = (face / 2 + 0.5).clamp(0, 1)
             face = (face * 255).to(torch.uint8).cpu().numpy()
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
-            return out_frame
+            yield out_frame
 
     @torch.no_grad()
     def __call__(
